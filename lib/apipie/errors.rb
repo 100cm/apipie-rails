@@ -1,9 +1,17 @@
 module Apipie
-
   class Error < StandardError
   end
 
   class ParamError < Error
+  end
+
+  class UnknownCode < Error
+  end
+
+  class ReturnsMultipleDefinitionError < Error
+    def to_s
+      "a 'returns' statement cannot indicate both array_of and type"
+    end
   end
 
   # abstract
@@ -12,6 +20,20 @@ module Apipie
 
     def initialize(param)
       @param = param
+    end
+  end
+
+  class ParamMultipleMissing < ParamError
+    attr_accessor :params
+
+    def initialize(params)
+      @params = params
+    end
+
+    def to_s
+      params.map do |param|
+        ParamMissing.new(param).to_s
+      end.join("\n")
     end
   end
 
@@ -39,7 +61,7 @@ module Apipie
     attr_accessor :value, :error
 
     def initialize(param, value, error)
-      super param
+      super(param)
       @value = value
       @error = error
     end
@@ -49,4 +71,15 @@ module Apipie
     end
   end
 
+  class ResponseDoesNotMatchSwaggerSchema < Error
+    def initialize(controller_name, method_name, response_code, error_messages, schema, returned_object)
+      super("Response does not match swagger schema (#{controller_name}##{method_name} #{response_code}): #{error_messages}\nSchema: #{JSON(schema)}\nReturned object: #{returned_object}")
+    end
+  end
+
+  class NoDocumentedMethod < Error
+    def initialize(controller_name, method_name)
+      super("There is no documented method #{controller_name}##{method_name}")
+    end
+  end
 end

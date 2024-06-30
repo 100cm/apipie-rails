@@ -1,15 +1,14 @@
 require 'apipie/static_dispatcher'
 require 'apipie/routes_formatter'
 require 'yaml'
-require 'digest/md5'
+require 'digest/sha1'
 require 'json'
 
 module Apipie
-
   class Application
     # we need engine just for serving static assets
     class Engine < Rails::Engine
-      initializer "static assets", :before => :build_middleware_stack do |app|
+      initializer 'static assets', before: :build_middleware_stack do |app|
         app.middleware.use ::Apipie::StaticDispatcher, "#{root}/app/public"
       end
     end
@@ -25,50 +24,46 @@ module Apipie
       @resource_descriptions.keys.sort
     end
 
-    def set_resource_id(controller, resource_id)
-      @controller_to_resource_id[controller] = resource_id
-    end
+    def rails_routes(route_set = nil, base_url = "")
+      return @_rails_routes if route_set.nil? && @_rails_routes
 
-    def rails_routes(route_set = nil)
-      if route_set.nil? && @rails_routes
-        return @rails_routes
-      end
       route_set ||= Rails.application.routes
       # ensure routes are loaded
       Rails.application.reload_routes! unless Rails.application.routes.routes.any?
 
-      flatten_routes = []
+      flattened_routes = []
 
       route_set.routes.each do |route|
-        if route.app.respond_to?(:routes) && route.app.routes.is_a?(ActionDispatch::Routing::RouteSet)
-          # recursively go though the moutned engines
-          flatten_routes.concat(rails_routes(route.app.routes))
+        # route is_a ActionDispatch::Journey::Route
+        # route.app is_a ActionDispatch::Routing::Mapper::Constraints
+        # route.app.app is_a TestEngine::Engine
+        route_app = route.app.app
+        if route_app.respond_to?(:routes) && route_app.routes.is_a?(ActionDispatch::Routing::RouteSet)
+          # recursively go though the mounted engines
+          flattened_routes.concat(rails_routes(route_app.routes, File.join(base_url, route.path.spec.to_s)))
         else
-          flatten_routes << route
+          route.base_url = base_url
+          flattened_routes << route
         end
       end
 
-      @rails_routes = flatten_routes
+      @_rails_routes = flattened_routes
     end
 
-    # the app might be nested when using contraints, namespaces etc.
-    # this method does in depth search for the route controller
-    def route_app_controller(app, route, visited_apps = [])
-      visited_apps << app
-      if app.respond_to?(:controller)
-        return app.controller(route.defaults)
-      elsif app.respond_to?(:app) && !visited_apps.include?(app.app)
-        return route_app_controller(app.app, route, visited_apps)
+    def rails_routes_by_controller_and_action
+      @_rails_routes_by_controller_and_action = rails_routes.group_by do |route|
+        requirements = route.requirements
+        [requirements[:controller], requirements[:action]]
       end
-    rescue ActionController::RoutingError
-      # some errors in the routes will not stop us here: just ignoring
+    end
+
+    def clear_cached_routes!
+      @_rails_routes = nil
+      @_rails_routes_by_controller_and_action = nil
     end
 
     def routes_for_action(controller, method, args)
-      routes = rails_routes.select do |route|
-        controller == route_app_controller(route.app, route) &&
-            method.to_s == route.defaults[:action]
-      end
+      routes = rails_routes_by_controller_and_action[[controller.name.underscore.chomp('_controller'), method.to_s]] || []
 
       Apipie.configuration.routes_formatter.format_routes(routes, args)
     end
@@ -82,8 +77,8 @@ module Apipie
       versions = controller_versions(controller) if versions.empty?
 
       versions.each do |version|
-        resource_name_with_version = "#{version}##{get_resource_name(controller)}"
-        resource_description = get_resource_description(resource_name_with_version)
+        resource_id_with_version = "#{version}##{get_resource_id(controller)}"
+        resource_description = get_resource_description(resource_id_with_version)
 
         if resource_description.nil?
           resource_description = define_resource_description(controller, version)
@@ -93,50 +88,61 @@ module Apipie
 
         # we create separate method description for each version in
         # case the method belongs to more versions. We return just one
-        # becuase the version doesn't matter for the purpose it's used
+        # because the version doesn't matter for the purpose it's used
         # (to wrap the original version with validators)
         ret_method_description ||= method_description
         resource_description.add_method_description(method_description)
       end
 
-      return ret_method_description
+      ret_method_description
     end
 
     # create new resource api description
     def define_resource_description(controller, version, dsl_data = nil)
       return if ignored?(controller)
 
-      resource_name = get_resource_name(controller)
-      resource_description = @resource_descriptions[version][resource_name]
+      resource_id = get_resource_id(controller)
+      resource_description = @resource_descriptions[version][resource_id]
       if resource_description
         # we already defined the description somewhere (probably in
         # some method. Updating just meta data from dsl
         resource_description.update_from_dsl_data(dsl_data) if dsl_data
       else
-        resource_description = Apipie::ResourceDescription.new(controller, resource_name, dsl_data, version)
+        resource_description = Apipie::ResourceDescription.new(controller, resource_id, dsl_data, version)
 
-        Apipie.debug("@resource_descriptions[#{version}][#{resource_name}] = #{resource_description}")
-        @resource_descriptions[version][resource_name] ||= resource_description
+        Apipie.debug("@resource_descriptions[#{version}][#{resource_id}] = #{resource_description}")
+        @resource_descriptions[version][resource_id] ||= resource_description
       end
 
-      return resource_description
+      resource_description
     end
 
     # recursively searches what versions has the controller specified in
     # resource_description? It's used to derivate the default value of
     # versions for methods.
     def controller_versions(controller)
-      ret = @controller_versions[controller]
-      return ret unless ret.empty?
-      if controller == ActionController::Base || controller.nil?
-        return [Apipie.configuration.default_version]
-      else
-        return controller_versions(controller.superclass)
+      value_from_parents(controller, default: [Apipie.configuration.default_version]) do |c|
+        ret = @controller_versions[c.to_s]
+        ret unless ret.empty?
       end
     end
 
+    # Recursively walks up the controller hierarchy looking for a value
+    # from the block.
+    # Stops at ActionController::Base.
+    # @param [Class] controller controller to start from
+    # @param [Array] args arguments passed to the block
+    # @param [Object] default default value to return if no value is found
+    # @param [Proc] block block to call with controller and args
+    def value_from_parents(controller, *args, default: nil, &block)
+      return default if controller == ActionController::Base || controller == AbstractController::Base || controller.nil?
+
+      thing = yield(controller, *args)
+      thing || value_from_parents(controller.superclass, *args, default: default, &block)
+    end
+
     def set_controller_versions(controller, versions)
-      @controller_versions[controller] = versions
+      @controller_versions[controller.to_s] = versions
     end
 
     def add_param_group(controller, name, &block)
@@ -146,7 +152,7 @@ module Apipie
 
     def get_param_group(controller, name)
       key = "#{controller.name}##{name}"
-      if @param_groups.has_key?(key)
+      if @param_groups.key?(key)
         return @param_groups[key]
       else
         raise "param group #{key} not defined"
@@ -157,34 +163,32 @@ module Apipie
     #
     # There are two ways how this method can be used:
     # 1) Specify both parameters
-    #   resource_name:
+    #   resource_id:
     #       controller class - UsersController
     #       string with resource name (plural) and version - "v1#users"
     #   method_name: name of the method (string or symbol)
     #
     # 2) Specify only first parameter:
-    #   resource_name: string containing both resource and method name joined
+    #   resource_id: string containing both resource and method name joined
     #   with '#' symbol.
     #   - "users#create" get default version
     #   - "v2#users#create" get specific version
-    def get_method_description(resource_name, method_name = nil)
-      if resource_name.is_a?(String)
-        crumbs = resource_name.split('#')
+    def get_method_description(resource_id, method_name = nil)
+      if resource_id.is_a?(String)
+        crumbs = resource_id.split('#')
         if method_name.nil?
           method_name = crumbs.pop
         end
-        resource_name = crumbs.join("#")
-        resource_description = get_resource_description(resource_name)
-      elsif resource_name.respond_to? :apipie_resource_descriptions
-        resource_description = get_resource_description(resource_name)
+        resource_id = crumbs.join("#")
+        resource_description = get_resource_description(resource_id)
+      elsif resource_id.respond_to? :apipie_resource_descriptions
+        resource_description = get_resource_description(resource_id)
       else
-        raise ArgumentError.new("Resource #{resource_name} does not exists.")
+        raise ArgumentError.new("Resource #{resource_id} does not exists.")
       end
-      unless resource_description.nil?
-        resource_description.method_description(method_name.to_sym)
-      end
+      resource_description&.method_description(method_name.to_sym)
     end
-    alias :[] :get_method_description
+    alias [] get_method_description
 
     # options:
     # => "users"
@@ -193,24 +197,22 @@ module Apipie
     def get_resource_description(resource, version = nil)
       if resource.is_a?(String)
         crumbs = resource.split('#')
-        if crumbs.size == 2
-          version = crumbs.first
-        end
+        version = crumbs.first if crumbs.size == 2
         version ||= Apipie.configuration.default_version
-        if @resource_descriptions.has_key?(version)
+        if @resource_descriptions.key?(version)
           return @resource_descriptions[version][crumbs.last]
         end
       else
-        resource_name = get_resource_name(resource)
+        resource_id = get_resource_id(resource)
         if version
-          resource_name = "#{version}##{resource_name}"
+          resource_id = "#{version}##{resource_id}"
         end
 
-        if resource_name.nil?
+        if resource_id.nil?
           return nil
         end
-        resource_description = get_resource_description(resource_name)
-        if resource_description && resource_description.controller == resource
+        resource_description = get_resource_description(resource_id)
+        if resource_description && resource_description.controller.to_s == resource.to_s
           return resource_description
         end
       end
@@ -232,7 +234,7 @@ module Apipie
 
     def remove_method_description(resource, versions, method_name)
       versions.each do |version|
-        resource = get_resource_name(resource)
+        resource = get_resource_id(resource)
         if resource_description = get_resource_description("#{version}##{resource}")
           resource_description.remove_method_description(method_name)
         end
@@ -241,12 +243,12 @@ module Apipie
 
     # initialize variables for gathering dsl data
     def init_env
-      @resource_descriptions = HashWithIndifferentAccess.new { |h, version| h[version] = {} }
+      @resource_descriptions = ActiveSupport::HashWithIndifferentAccess.new { |h, version| h[version] = {} }
       @controller_to_resource_id = {}
       @param_groups = {}
 
       # what versions does the controller belong in (specified by resource_description)?
-      @controller_versions = Hash.new { |h, controller| h[controller] = [] }
+      @controller_versions = Hash.new { |h, controller| h[controller.to_s] = [] }
     end
 
     def recorded_examples
@@ -258,11 +260,44 @@ module Apipie
       @recorded_examples = nil
     end
 
-    def to_json(version, resource_name, method_name, lang)
+    def json_schema_for_method_response(version, controller_name, method_name, return_code, allow_nulls)
+      method = @resource_descriptions[version][controller_name].method_description(method_name)
+      raise NoDocumentedMethod.new(controller_name, method_name) if method.nil?
 
-      return unless valid_search_args?(version, resource_name, method_name)
+      Apipie::SwaggerGenerator
+        .json_schema_for_method_response(method, return_code, allow_nulls)
+    end
 
-      _resources = if resource_name.blank?
+    def json_schema_for_self_describing_class(cls, allow_nulls)
+      Apipie::SwaggerGenerator
+        .json_schema_for_self_describing_class(cls, allow_nulls)
+    end
+
+    def to_swagger_json(version, resource_id, method_name, language, clear_warnings = false)
+      return unless valid_search_args?(version, resource_id, method_name)
+
+      resources =
+        Apipie::Generator::Swagger::ResourceDescriptionsCollection
+        .new(resource_descriptions)
+        .filter(
+          resource_id: resource_id,
+          method_name: method_name,
+          version: version
+        )
+
+      Apipie::SwaggerGenerator.generate_from_resources(
+        resources,
+        version: version,
+        language: language,
+        clear_warnings: clear_warnings
+      )
+    end
+
+    def to_json(version, resource_id, method_name, lang)
+
+      return unless valid_search_args?(version, resource_id, method_name)
+
+      _resources = if resource_id.blank?
         # take just resources which have some methods because
         # we dont want to show eg ApplicationController as resource
         resource_descriptions[version].inject({}) do |result, (k,v)|
@@ -270,7 +305,7 @@ module Apipie
           result
         end
       else
-        [@resource_descriptions[version][resource_name].to_json(method_name, lang)]
+        [@resource_descriptions[version][resource_id].to_json(method_name, lang)]
       end
 
       url_args = Apipie.configuration.version_in_url ? version : ''
@@ -326,7 +361,7 @@ module Apipie
           all.update(version => Apipie.to_json(version))
         end
       end
-      Digest::MD5.hexdigest(JSON.dump(all_docs))
+      Digest::SHA1.hexdigest(JSON.dump(all_docs))
     end
 
     def checksum
@@ -337,18 +372,42 @@ module Apipie
     # with specific setting for some environment there is no reason the dsl
     # should be interpreted (e.g. no validations and doc from cache)
     def active_dsl?
-      Apipie.configuration.validate? || ! Apipie.configuration.use_cache? || Apipie.configuration.force_dsl?
+      Apipie.configuration.validate? || !Apipie.configuration.use_cache? || Apipie.configuration.force_dsl?
     end
 
+    # @deprecated Use {#get_resource_id} instead
     def get_resource_name(klass)
+      ActiveSupport::Deprecation.warn(
+        <<~HEREDOC
+          Apipie::Application.get_resource_name is deprecated.
+          Use `Apipie::Application.get_resource_id instead.
+        HEREDOC
+      )
+
+      get_resource_id(klass)
+    end
+
+    def set_resource_id(controller, resource_id)
+      @controller_to_resource_id[controller] = resource_id
+    end
+
+    def get_resource_id(klass)
       if klass.class == String
         klass
-      elsif @controller_to_resource_id.has_key?(klass)
+      elsif @controller_to_resource_id.key?(klass)
         @controller_to_resource_id[klass]
       elsif Apipie.configuration.namespaced_resources? && klass.respond_to?(:controller_path)
         return nil if klass == ActionController::Base
+
+        version_prefix = version_prefix(klass)
         path = klass.controller_path
-        path.gsub(version_prefix(klass), "").gsub("/", "-")
+
+        unless version_prefix == '/'
+          path =
+            path.gsub(version_prefix, '')
+        end
+
+        path.gsub('/', '-')
       elsif klass.respond_to?(:controller_name)
         return nil if klass == ActionController::Base
         klass.controller_name
@@ -358,11 +417,11 @@ module Apipie
     end
 
     def locale
-      Apipie.configuration.locale.call(nil) if Apipie.configuration.locale
+      Apipie.configuration.locale&.call(nil)
     end
 
     def locale=(locale)
-      Apipie.configuration.locale.call(locale) if Apipie.configuration.locale
+      Apipie.configuration.locale&.call(locale)
     end
 
     def translate(str, locale)
@@ -375,24 +434,24 @@ module Apipie
 
     private
 
-    # Make sure that the version/resource_name/method_name are valid combination
-    # resource_name and method_name can be nil
-    def valid_search_args?(version, resource_name, method_name)
-      return false unless self.resource_descriptions.has_key?(version)
-      if resource_name
-        return false unless self.resource_descriptions[version].has_key?(resource_name)
+    # Make sure that the version/resource_id/method_name are valid combination
+    # resource_id and method_name can be nil
+    def valid_search_args?(version, resource_id, method_name)
+      return false unless self.resource_descriptions.key?(version)
+      if resource_id
+        return false unless self.resource_descriptions[version].key?(resource_id)
         if method_name
-          resource_description = self.resource_descriptions[version][resource_name]
+          resource_description = self.resource_descriptions[version][resource_id]
           return false unless resource_description.valid_method_name?(method_name)
         end
       end
-      return true
+      true
     end
 
     def version_prefix(klass)
       version = controller_versions(klass).first
       base_url = get_base_url(version)
-      return "/" if base_url.nil?
+      return "/" if base_url.blank?
       base_url[1..-1] + "/"
     end
 
@@ -409,7 +468,7 @@ module Apipie
     end
 
     def load_controller_from_file(controller_file)
-      controller_class_name = controller_file.gsub(/\A.*\/app\/controllers\//,"").gsub(/\.\w*\Z/,"").camelize
+      controller_class_name = controller_file.gsub(/\A.*\/app\/controllers\//, '').gsub(/\.\w*\Z/, '').camelize
       controller_class_name.constantize
     end
 
@@ -429,12 +488,12 @@ module Apipie
     # as this would break loading of the controllers.
     def rails_mark_classes_for_reload
       unless Rails.application.config.cache_classes
-        ActionDispatch::Reloader.cleanup!
+        clear_cached_routes!
+        Rails.application.reloader.reload!
         init_env
         reload_examples
-        ActionDispatch::Reloader.prepare!
+        Rails.application.reloader.prepare!
       end
     end
-
   end
 end

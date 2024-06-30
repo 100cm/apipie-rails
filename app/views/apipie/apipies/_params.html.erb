@@ -7,10 +7,15 @@
   <% end %>
   <tr style='background-color:rgb(<%= "#{col},#{col},#{col}" %>);'>
     <td>
-      <strong><%= param[:full_name] %> </strong><br>
+      <strong><%= param[:full_name] %></strong>
+      <% if param[:deprecated].present? %>
+        <code><%= t('apipie.deprecated').upcase %></code>
+      <% end %>
+      <br>
       <small>
         <%= param[:required] ? t('apipie.required') : t('apipie.optional') %>
         <%= param[:allow_nil] ? ', '+t('apipie.nil_allowed') : '' %>
+        <%= param[:allow_blank] ? ', '+t('apipie.blank_allowed') : '' %>
       </small>
     </td>
     <td>
@@ -21,11 +26,15 @@
           <%- if param[:validator].present? %>
             <li><%= Apipie.markup_to_html(param[:validator]).html_safe %></li>
           <%- end %>
-          <%- param[:validations].each do |item| %>
-            <li><%= item.html_safe %></li>
+          <%- if param[:validations].present? %>
+            <%- param[:validations].each do |item| %>
+              <li><%= item.html_safe %></li>
+            <%- end %>
           <%- end %>
         </ul>
       <%- end %>
+
+      <%= render partial: 'deprecation', locals: { deprecation: param[:deprecation] } %>
 
       <% unless param[:metadata].blank? %>
         <br>

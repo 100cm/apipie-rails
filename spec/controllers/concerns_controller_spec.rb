@@ -7,13 +7,13 @@ describe ConcernsController do
     expect(Apipie["concern_resources#show"]).to be
   end
 
-  it "should reply to valid request" do
-    get :show, :id => '5', :session => "secret_hash"
+  it "replies to valid request" do
+    get :show, :params => { :id => '5' }, :session => { :user_id => "secret_hash" }
     assert_response :success
   end
 
-  it "should pass if required parameter is missing" do
-    expect { get :show, :id => '5' }.not_to raise_error
+  it "passes if required parameter is missing" do
+    expect { get :show, :params => { :id => '5' } }.not_to raise_error
   end
 
   it "peserved the order of methods being defined in file" do

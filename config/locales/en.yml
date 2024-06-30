@@ -15,6 +15,7 @@ en:
     required: required
     optional: optional
     nil_allowed: nil allowed
+    blank_allowed: blank allowed
     param_name: Param name
     params: Params
     examples: Examples
@@ -29,3 +30,12 @@ en:
     api_documentation: API documentation
     headers: Headers
     header_name: Header name
+    code: Code
+    returns: Returns
+    deprecated: Deprecated
+    deprecation_details: Deprecation details
+    deprecation:
+      attributes:
+        deprecated_in: Deprecated in
+        sunset_at: Sunset at
+        info: Info

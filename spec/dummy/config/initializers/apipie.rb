@@ -1,12 +1,14 @@
 Apipie.configure do |config|
   config.app_name = "Test app"
   config.copyright = "&copy; 2012 Pavel Pokorny"
+  config.languages = ['en']
+  config.default_locale = 'en'
 
   # set default API version
   # can be overriden in resource_description
   # by default is it 1.0 if not specified anywhere
   # this must be defined before api_base_url and app_info
-  config.default_version = "development"
+  config.default_version = "development".freeze
 
   config.doc_base_url = "/apidoc"
 
@@ -21,7 +23,7 @@ Apipie.configure do |config|
   #     rake apipie:cache
   #
   config.use_cache = Rails.env.production?
-  # config.cache_dir = File.join(Rails.root, "public", "apipie-cache") # optional
+  config.cache_dir = File.join(Rails.root, "tmp", "apipie-cache") # optional
 
   # set to enable/disable reloading controllers (and the documentation with it),
   # by default enabled in development
@@ -87,7 +89,7 @@ class Apipie::Validator::IntegerValidator < Apipie::Validator::BaseValidator
   end
 
   def self.build(param_description, argument, options, block)
-    if argument == Integer || argument == Fixnum
+    if argument == Integer
       self.new(param_description, argument)
     end
   end

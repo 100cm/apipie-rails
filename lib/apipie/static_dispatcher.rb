@@ -1,16 +1,24 @@
 module Apipie
-
   class FileHandler
     def initialize(root)
       @root          = root.chomp('/')
       @compiled_root = /^#{Regexp.escape(root)}/
-      @file_server   = ::Rack::File.new(@root)
+      @file_server   = if defined?(::Rack::Files)
+                         ::Rack::Files.new(@root)
+                       else
+                         # Deprecated in Rack 3.0, kept
+                         # for backward compatibility
+                         ::Rack::File.new(@root)
+                       end
     end
 
     def match?(path)
-      path = path.dup
+      # Replace all null bytes
+      path = ::Rack::Utils.unescape(path || '')
+                          .encode(Encoding::UTF_8, invalid: :replace, replace: '')
+                          .gsub("\x0", '')
 
-      full_path = path.empty? ? @root : File.join(@root, ::Rack::Utils.unescape(path))
+      full_path = path.empty? ? @root : File.join(@root, path)
       paths = "#{full_path}#{ext}"
 
       matches = Dir[paths]
@@ -38,7 +46,6 @@ module Apipie
       else
         ::ActionController::Base.page_cache_extension
       end
-
     end
   end
 
@@ -54,10 +61,10 @@ module Apipie
       @baseurl ||= Apipie.configuration.doc_base_url
       case env['REQUEST_METHOD']
       when 'GET', 'HEAD'
-        path = env['PATH_INFO'].sub("#{@baseurl}/","/apipie/").chomp('/')
+        path = env['PATH_INFO'].sub("#{@baseurl}/", '/apipie/').chomp('/')
 
         if match = @file_handler.match?(path)
-          env["PATH_INFO"] = match
+          env['PATH_INFO'] = match
           return @file_handler.call(env)
         end
       end

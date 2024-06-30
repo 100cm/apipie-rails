@@ -1,22 +1,44 @@
 module Apipie
   class Configuration
+    extend Forwardable
 
-    attr_accessor :app_name, :app_info, :copyright, :markup, :disqus_shortname,
+    attr_accessor :app_name, :app_info, :copyright, :compress_examples,
+      :markup, :disqus_shortname,
       :api_base_url, :doc_base_url, :required_by_default, :layout,
       :default_version, :debug, :version_in_url, :namespaced_resources,
-      :validate, :validate_value, :validate_presence, :validate_key, :authenticate, :doc_path,
+      :validate, :validate_value, :validate_presence, :validate_key, :action_on_non_validated_keys, :authenticate, :doc_path,
       :show_all_examples, :process_params, :update_checksum, :checksum_path,
       :link_extension, :record, :languages, :translate, :locale, :default_locale,
-      :persist_show_in_doc, :authorize
+      :persist_show_in_doc, :authorize, :ignore_allow_blank_false
 
-    alias_method :validate?, :validate
-    alias_method :required_by_default?, :required_by_default
-    alias_method :namespaced_resources?, :namespaced_resources
+    def_delegators :swagger, *Apipie::Generator::Swagger::Config.deprecated_methods
+
+    def swagger
+      Apipie::Generator::Swagger::Config.instance
+    end
+
+    def generator
+      Apipie::Generator::Config.instance
+    end
+
+    alias validate? validate
+    alias required_by_default? required_by_default
+    alias namespaced_resources? namespaced_resources
 
     # matcher to be used in Dir.glob to find controllers to be reloaded e.g.
     #
     #   "#{Rails.root}/app/controllers/api/*.rb"
     attr_accessor :api_controllers_matcher
+
+    # An object that responds to a `.call(controller)` method responsible for
+    # matching the correct controller action
+    attr_reader :api_action_matcher
+
+    def api_action_matcher=(callable)
+      raise 'Must implement .call method' unless callable.respond_to?(:call)
+
+      @api_action_matcher = callable
+    end
 
     # set to true if you want to reload the controllers at each refresh of the
     # documentation. It requires +:api_controllers_matcher+ to be set to work
@@ -36,39 +58,39 @@ module Apipie
 
     def reload_controllers?
       @reload_controllers = Rails.env.development? unless defined? @reload_controllers
-      return @reload_controllers && @api_controllers_matcher
+      @reload_controllers && @api_controllers_matcher
     end
 
     def validate_value
-      return (validate? && @validate_value)
+      validate? && @validate_value
     end
-    alias_method :validate_value?, :validate_value
+    alias validate_value? validate_value
 
     def validate_presence
-      return (validate? && @validate_presence)
+      validate? && @validate_presence
     end
-    alias_method :validate_presence?, :validate_presence
+    alias validate_presence? validate_presence
 
     def validate_key
-      return (validate? && @validate_key)
+      validate? && @validate_key
     end
-    alias_method :validate_key?, :validate_key
+    alias validate_key? validate_key
 
     def process_value?
       @process_params
     end
     # set to true if you want to use pregenerated documentation cache and avoid
-    # generating the documentation on runtime (usefull for production
+    # generating the documentation on runtime (useful for production
     # environment).
     # You can generate the cache by running
     #
     #     rake apipie:cache
     attr_accessor :use_cache
-    alias_method :use_cache?, :use_cache
+    alias use_cache? use_cache
 
     attr_writer :cache_dir
     def cache_dir
-      @cache_dir ||= File.join(Rails.root, "public", "apipie-cache")
+      @cache_dir ||= File.join(Rails.root, 'public', 'apipie-cache')
     end
 
     # if there is not obvious reason why the DSL should be turned on (no
@@ -90,7 +112,7 @@ module Apipie
     end
 
     # array of controller names (strings) (might include actions as well)
-    # to be ignored # when generationg the documentation
+    # to be ignored # when generating the documentation
     # e.g. %w[Api::CommentsController Api::PostsController#post]
     attr_writer :ignored
     def ignored
@@ -108,11 +130,15 @@ module Apipie
     # the line above the docs.
     attr_writer :generated_doc_disclaimer
     def generated_doc_disclaimer
-      @generated_doc_disclaimer ||= "# DOC GENERATED AUTOMATICALLY: REMOVE THIS LINE TO PREVENT REGENARATING NEXT TIME"
+      @generated_doc_disclaimer ||= "# DOC GENERATED AUTOMATICALLY: REMOVE THIS LINE TO PREVENT REGENERATING NEXT TIME"
     end
 
     def use_disqus?
       !@disqus_shortname.blank?
+    end
+
+    def use_ga?
+      !@ga.blank?
     end
 
     # set app description for default version
@@ -138,31 +164,35 @@ module Apipie
     def initialize
       @markup = Apipie::Markup::RDoc.new
       @app_name = "Another API"
-      @app_info = HashWithIndifferentAccess.new
+      @app_info = ActiveSupport::HashWithIndifferentAccess.new
       @copyright = nil
       @validate = :implicitly
       @validate_value = true
       @validate_presence = true
       @validate_key = false
+      @action_on_non_validated_keys = :raise
       @required_by_default = false
-      @api_base_url = HashWithIndifferentAccess.new
+      @api_base_url = ActiveSupport::HashWithIndifferentAccess.new
+      @api_action_matcher = proc { |controller| controller.params[:action] }
       @doc_base_url = "/apipie"
       @layout = "apipie/apipie"
       @disqus_shortname = nil
-      @default_version = "1.0"
+      @ga = nil
+      @default_version = '1.0'
       @debug = false
+      @ignore_allow_blank_false = false
       @version_in_url = true
       @namespaced_resources = false
-      @doc_path = "doc"
+      @doc_path = 'doc'
       @process_params = false
       @checksum_path = [@doc_base_url, '/api/']
       @update_checksum = false
-      @link_extension = ".html"
+      @link_extension = '.html'
       @record = false
       @languages = []
       @default_locale = 'en'
-      @locale = lambda { |locale| @default_locale }
-      @translate = lambda { |str, locale| str }
+      @locale = ->(_locale) { @default_locale }
+      @translate = ->(str, _locale) { str }
       @persist_show_in_doc = false
       @routes_formatter = RoutesFormatter.new
     end
